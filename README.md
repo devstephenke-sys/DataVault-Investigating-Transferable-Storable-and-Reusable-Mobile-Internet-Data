@@ -48,10 +48,22 @@ datavault-phase3/
 ### Prerequisites
 
 - Python 3.12+
-- Docker and Docker Compose
+- Docker and Docker Compose (optional, for full deployment)
 - Git
 
-### Installation
+### Quick Start (Simplified Demo)
+
+The fastest way to see DataVault in action is to run the simplified demo:
+
+```bash
+git clone https://github.com/devstephenke-sys/DataVault-Investigating-Transferable-Storable-and-Reusable-Mobile-Internet-Data.git
+cd DataVault
+python run_demo.py
+```
+
+This runs an in-memory demonstration of all core functionality without requiring database setup or Docker.
+
+### Full Installation
 
 1. Clone the repository:
 ```bash
