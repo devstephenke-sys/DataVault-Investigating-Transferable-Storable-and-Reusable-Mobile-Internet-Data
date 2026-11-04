@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database - Simulated Operator
+  postgres-operator:
+    image: postgres:15-alpine
+    container_name: datavault-operator-db
+    environment:
+      POSTGRES_DB: datavault_operator
+      POSTGRES_USER: datavault
+      POSTGRES_PASSWORD: datavault_operator_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_operator_data:/var/lib/postgresql/data
+      - ./mode_a_simulated_operator/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datavault"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL Database - DataVault Backend
+  postgres-backend:
+    image: postgres:15-alpine
+    container_name: datavault-backend-db
+    environment:
+      POSTGRES_DB: datavault_backend
+      POSTGRES_USER: datavault
+      POSTGRES_PASSWORD: datavault_backend_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_backend_data:/var/lib/postgresql/data
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datavault"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: datavault-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Simulated Operator API
+  operator-api:
+    build:
+      context: .
+      dockerfile: mode_a_simulated_operator/operator_api/Dockerfile
+    container_name: datavault-operator-api
+    environment:
+      DATABASE_URL: postgresql://datavault:datavault_operator_password@postgres-operator:5432/datavault_operator
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: operator_secret_key_change_in_production
+      JWT_ALGORITHM: RS256
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres-operator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./mode_a_simulated_operator:/app
+
+  # DataVault Backend API
+  datavault-backend:
+    build:
+      context: .
+      dockerfile: backend/api/Dockerfile
+    container_name: datavault-backend
+    environment:
+      DATABASE_URL: postgresql://datavault:datavault_backend_password@postgres-backend:5432/datavault_backend
+      REDIS_URL: redis://redis:6379/1
+      OPERATOR_API_URL: http://operator-api:8000
+      JWT_SECRET_KEY: datavault_secret_key_change_in_production
+      JWT_ALGORITHM: RS256
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres-backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      operator-api:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+
+  # Device Simulator
+  device-simulator:
+    build:
+      context: .
+      dockerfile: device_simulator/Dockerfile
+    container_name: datavault-device-simulator
+    environment:
+      DATAVAULT_BACKEND_URL: http://datavault-backend:8000
+      DEVICE_ID: SIM-DEVICE-001
+    ports:
+      - "8002:8000"
+    depends_on:
+      datavault-backend:
+        condition: service_started
+    volumes:
+      - ./device_simulator:/app
+      - token_storage:/app/tokens
+
+volumes:
+  postgres_operator_data:
+  postgres_backend_data:
+  redis_data:
+  token_storage:
+
+networks:
+  default:
+    name: datavault-network
