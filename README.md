@@ -55,8 +55,8 @@ datavault-phase3/
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
-cd datavault-phase3
+git clone https://github.com/devstephenke-sys/DataVault-Investigating-Transferable-Storable-and-Reusable-Mobile-Internet-Data.git
+cd DataVault
 ```
 
 2. Create virtual environment:
@@ -142,14 +142,14 @@ pytest --cov=. tests/
 
 **Progress:**
 - [x] Project structure created
-- [ ] Docker Compose environment
-- [ ] Simulated operator implementation
-- [ ] DataVault backend implementation
-- [ ] Device simulator implementation
-- [ ] Automated tests
-- [ ] Linux gateway agent
-- [ ] Hardware documentation
-- [ ] Final engineering verdict
+- [x] Docker Compose environment
+- [x] Simulated operator implementation
+- [x] DataVault backend implementation
+- [x] Device simulator implementation
+- [x] Automated tests
+- [x] Linux gateway agent
+- [x] Hardware documentation
+- [x] Final engineering verdict
 
 ## License
 
