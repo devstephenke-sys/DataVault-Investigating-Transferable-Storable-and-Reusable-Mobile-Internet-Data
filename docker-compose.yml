@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: datavault
       POSTGRES_PASSWORD: datavault_operator_password
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - postgres_operator_data:/var/lib/postgresql/data
       - ./mode_a_simulated_operator/database/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -29,7 +29,7 @@ services:
       POSTGRES_USER: datavault
       POSTGRES_PASSWORD: datavault_backend_password
     ports:
-      - "5433:5432"
+      - "5435:5432"
     volumes:
       - postgres_backend_data:/var/lib/postgresql/data
       - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -44,7 +44,7 @@ services:
     image: redis:7-alpine
     container_name: datavault-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:

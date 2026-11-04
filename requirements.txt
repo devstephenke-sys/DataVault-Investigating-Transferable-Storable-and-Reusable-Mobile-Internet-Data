@@ -7,12 +7,6 @@ pydantic-settings==2.1.0
 # Database
 sqlalchemy==2.0.25
 alembic==1.13.1
-psycopg2-binary==2.9.9
-asyncpg==0.29.0
-
-# Redis
-redis==5.0.1
-hiredis==2.2.3
 
 # Security
 python-jose[cryptography]==3.3.0
@@ -35,17 +29,8 @@ python-dotenv==1.0.0
 pyyaml==6.0.1
 click==8.1.7
 
-# Database migrations
-alembic==1.13.1
-
-# Async support
-asyncpg==0.29.0
-
 # Device simulation
 flask==3.0.0
-
-# Hardware interface (for Mode B)
-pyserial==3.5
 
 # Logging
 structlog==24.1.0
@@ -58,6 +43,3 @@ python-dateutil==2.8.2
 
 # UUID handling
 uuid-utils==0.8.0
-
-# Environment
-python-dotenv==1.0.0
