@@ -8,19 +8,23 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta
 import uuid
-import jwt
 import asyncpg
 from contextlib import asynccontextmanager
 import os
 import json
 
+from config import settings
+from security import get_jwt_manager, SubscriberAuth
+
 # Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://datavault:datavault_operator_password@localhost:5432/datavault_operator")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "operator_secret_key_change_in_production")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "RS256")
-JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "720"))  # 30 days default
+DATABASE_URL = settings.DATABASE_URL
+JWT_EXPIRY_HOURS = settings.JWT_EXPIRY_HOURS
 
 security = HTTPBearer()
+
+# Initialize security components
+jwt_manager = get_jwt_manager()
+subscriber_auth = SubscriberAuth(jwt_manager)
 
 # Database connection pool
 db_pool = None
@@ -28,9 +32,14 @@ db_pool = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
-    yield
-    await db_pool.close()
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
+        print(f"Connected to database: {DATABASE_URL}")
+        yield
+    finally:
+        if db_pool:
+            await db_pool.close()
+            print("Database connection closed")
 
 app = FastAPI(
     title="Simulated Operator API",
@@ -97,13 +106,13 @@ def generate_jwt_token(entitlement_data: dict) -> str:
         "device_binding": entitlement_data["device_binding"],
         "nonce": str(uuid.uuid4())
     }
-    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    token = jwt_manager.generate_token(payload, expires_in_hours=JWT_EXPIRY_HOURS)
     return token
 
 def verify_jwt_token(token: str) -> dict:
     """Verify and decode a JWT token"""
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt_manager.verify_token(token)
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -116,47 +125,60 @@ async def quota_transfer(request: TransferRequest, db=Depends(get_db)):
     """
     Transfer quota from subscriber to device
     """
+    # Verify subscriber authorization
+    try:
+        auth_payload = subscriber_auth.verify_auth_token(
+            request.authorization,
+            expected_subscriber_id=request.source_subscriber
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Authorization failed: {str(e)}"
+        )
+
     async with db.acquire() as conn:
-        # Check subscriber quota
-        quota = await conn.fetchrow(
-            "SELECT remaining_volume FROM quota_balances WHERE subscriber_id = $1",
-            request.source_subscriber
-        )
-
-        if not quota:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-
-        if quota['remaining_volume'] < request.volume:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Insufficient quota. Available: {quota['remaining_volume']}, Requested: {request.volume}"
-            )
-
-        # Check if device is registered
-        device = await conn.fetchrow(
-            "SELECT device_id FROM device_registrations WHERE device_id = $1 AND status = 'ACTIVE'",
-            request.destination_device_id
-        )
-
-        if not device:
-            raise HTTPException(status_code=404, detail="Device not registered or inactive")
-
-        # Check if device already has active entitlement
-        existing = await conn.fetchrow(
-            """SELECT entitlement_id FROM entitlements
-               WHERE destination_device_id = $1 AND status IN ('ACTIVE', 'STORED', 'PARTIALLY_CONSUMED')
-               AND expires_at > NOW()""",
-            request.destination_device_id
-        )
-
-        if existing:
-            raise HTTPException(
-                status_code=409,
-                detail="Device already has an active entitlement"
-            )
-
-        # Start transaction
+        # Use transaction for atomic operation
         async with conn.transaction():
+            # Check subscriber quota with row lock
+            quota = await conn.fetchrow(
+                "SELECT remaining_volume FROM quota_balances WHERE subscriber_id = $1 FOR UPDATE",
+                request.source_subscriber
+            )
+
+            if not quota:
+                raise HTTPException(status_code=404, detail="Subscriber not found")
+
+            if quota['remaining_volume'] < request.volume:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Insufficient quota. Available: {quota['remaining_volume']}, Requested: {request.volume}"
+                )
+
+            # Check if device is registered
+            device = await conn.fetchrow(
+                "SELECT device_id FROM device_registrations WHERE device_id = $1 AND status = 'ACTIVE'",
+                request.destination_device_id
+            )
+
+            if not device:
+                raise HTTPException(status_code=404, detail="Device not registered or inactive")
+
+            # Check if device already has active entitlement
+            existing = await conn.fetchrow(
+                """SELECT entitlement_id FROM entitlements
+                   WHERE destination_device_id = $1 AND status IN ('ACTIVE', 'STORED', 'PARTIALLY_CONSUMED')
+                   AND expires_at > NOW()
+                   FOR UPDATE""",
+                request.destination_device_id
+            )
+
+            if existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Device already has an active entitlement"
+                )
+
             # Deduct from source subscriber
             await conn.execute(
                 """UPDATE quota_balances
@@ -233,23 +255,23 @@ async def validate_entitlement(request: ValidationRequest, db=Depends(get_db)):
     """
     Validate entitlement token
     """
+    # Verify JWT token - THIS IS CRITICAL
+    try:
+        payload = verify_jwt_token(request.token)
+    except HTTPException as e:
+        return ValidationResult(
+            valid=False,
+            error=str(e.detail)
+        )
+
+    # Check device binding
+    if payload['destination_device_id'] != request.device_id:
+        return ValidationResult(
+            valid=False,
+            error="Device mismatch"
+        )
+
     async with db.acquire() as conn:
-        # Verify JWT token
-        try:
-            payload = verify_jwt_token(request.token)
-        except HTTPException as e:
-            return ValidationResult(
-                valid=False,
-                error="Token verification failed"
-            )
-
-        # Check device binding
-        if payload['destination_device_id'] != request.device_id:
-            return ValidationResult(
-                valid=False,
-                error="Device mismatch"
-            )
-
         # Fetch entitlement from database
         entitlement = await conn.fetchrow(
             "SELECT * FROM entitlements WHERE entitlement_id = $1",
@@ -295,13 +317,23 @@ async def report_usage(request: UsageReport, db=Depends(get_db)):
     """
     Report usage for entitlement
     """
+    # First validate the entitlement (this will verify the token)
+    # We need to get the token first from the database
     async with db.acquire() as conn:
-        # Validate entitlement
+        entitlement = await conn.fetchrow(
+            "SELECT * FROM entitlements WHERE entitlement_id = $1",
+            request.entitlement_id
+        )
+
+        if not entitlement:
+            raise HTTPException(status_code=404, detail="Entitlement not found")
+
+        # Validate the token we have on file
         validation = await validate_entitlement(
             ValidationRequest(
                 entitlement_id=request.entitlement_id,
                 device_id=request.device_id,
-                token=""  # Token not needed for usage reporting if already validated
+                token=entitlement['token_signature']
             ),
             db
         )
@@ -309,9 +341,9 @@ async def report_usage(request: UsageReport, db=Depends(get_db)):
         if not validation.valid:
             raise HTTPException(status_code=400, detail=validation.error)
 
-        # Get current entitlement
+        # Get current entitlement with row lock
         entitlement = await conn.fetchrow(
-            "SELECT * FROM entitlements WHERE entitlement_id = $1",
+            "SELECT * FROM entitlements WHERE entitlement_id = $1 FOR UPDATE",
             request.entitlement_id
         )
 
@@ -324,6 +356,21 @@ async def report_usage(request: UsageReport, db=Depends(get_db)):
 
         # Start transaction
         async with conn.transaction():
+            # Check for duplicate usage report (idempotency)
+            existing_report = await conn.fetchrow(
+                """SELECT report_id FROM usage_reports
+                   WHERE entitlement_id = $1 AND session_id = $2""",
+                request.entitlement_id, request.session_id
+            )
+
+            if existing_report:
+                # Deduplicate - return current state
+                return UsageReportResult(
+                    remaining_volume=entitlement['remaining_volume'],
+                    transaction_id=str(existing_report['report_id']),
+                    status=entitlement['status']
+                )
+
             # Record usage
             await conn.execute(
                 """INSERT INTO usage_reports

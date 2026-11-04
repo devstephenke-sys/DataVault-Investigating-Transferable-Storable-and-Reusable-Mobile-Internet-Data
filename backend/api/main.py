@@ -8,21 +8,26 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta
 import uuid
-import jwt
 import asyncpg
 from contextlib import asynccontextmanager
 import os
 import httpx
 import json
 
+from config import settings
+from security import BackendJWTManager, DeviceAuth
+
 # Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://datavault:datavault_backend_password@localhost:5433/datavault_backend")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/1")
-OPERATOR_API_URL = os.getenv("OPERATOR_API_URL", "http://localhost:8001")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "datavault_secret_key_change_in_production")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "RS256")
+DATABASE_URL = settings.DATABASE_URL
+REDIS_URL = settings.REDIS_URL
+OPERATOR_API_URL = settings.OPERATOR_API_URL
+JWT_SECRET_KEY = settings.JWT_SECRET_KEY
 
 security = HTTPBearer()
+
+# Initialize security components
+backend_jwt_manager = BackendJWTManager(settings.OPERATOR_PUBLIC_KEY)
+device_auth = DeviceAuth(JWT_SECRET_KEY)
 
 # Database connection pool
 db_pool = None
@@ -30,9 +35,14 @@ db_pool = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
-    yield
-    await db_pool.close()
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
+        print(f"Connected to database: {DATABASE_URL}")
+        yield
+    finally:
+        if db_pool:
+            await db_pool.close()
+            print("Database connection closed")
 
 app = FastAPI(
     title="DataVault Backend API",
@@ -54,6 +64,7 @@ class TransferRequest(BaseModel):
     volume: int
     expiry: datetime
     transfer_mode: str = "TRANSFER"
+    authorization: str  # Subscriber auth token
 
 class Entitlement(BaseModel):
     entitlement_id: str
@@ -69,7 +80,7 @@ class Entitlement(BaseModel):
 class ValidationRequest(BaseModel):
     entitlement_id: str
     device_id: str
-    token: str
+    token: str  # This must be the actual JWT token from operator
 
 class ValidationResult(BaseModel):
     valid: bool
@@ -84,6 +95,12 @@ class UsageReport(BaseModel):
     volume_consumed: int
     session_id: str
     reported_at: datetime
+    token: str  # CRITICAL: Must include the actual JWT token
+
+class UsageReportResult(BaseModel):
+    remaining_volume: int
+    transaction_id: str
+    status: str
 
 # Helper functions
 async def get_db():
@@ -163,7 +180,7 @@ async def initiate_transfer(request: TransferRequest, db=Depends(get_db)):
         "volume": request.volume,
         "expiry": request.expiry,
         "transfer_mode": request.transfer_mode,
-        "authorization": "Bearer test_token"  # In production, this would be a real subscriber token
+        "authorization": request.authorization
     }
 
     try:
@@ -198,7 +215,14 @@ async def initiate_transfer(request: TransferRequest, db=Depends(get_db)):
 async def validate_entitlement(request: ValidationRequest, db=Depends(get_db)):
     """
     Validate entitlement (locally cached and through operator)
+    CRITICAL: Must verify the actual JWT token, not accept empty strings
     """
+    if not request.token or request.token == "":
+        return ValidationResult(
+            valid=False,
+            error="Token is required and cannot be empty"
+        )
+
     async with db.acquire() as conn:
         # Check local cache
         local_entitlement = await conn.fetchrow(
@@ -207,11 +231,11 @@ async def validate_entitlement(request: ValidationRequest, db=Depends(get_db)):
         )
 
         if not local_entitlement:
-            # Validate through operator
+            # Validate through operator - pass the actual token
             operator_request = {
                 "entitlement_id": request.entitlement_id,
                 "device_id": request.device_id,
-                "token": request.token
+                "token": request.token  # CRITICAL: Pass the actual token
             }
 
             try:
@@ -223,7 +247,14 @@ async def validate_entitlement(request: ValidationRequest, db=Depends(get_db)):
                     error=f"Operator validation failed: {str(e)}"
                 )
 
-        # Local validation
+        # Local validation - verify token matches what we have
+        if local_entitlement['token'] != request.token:
+            return ValidationResult(
+                valid=False,
+                error="Token mismatch"
+            )
+
+        # Check device binding
         if local_entitlement['destination_device_id'] != request.device_id:
             return ValidationResult(
                 valid=False,
@@ -255,7 +286,15 @@ async def validate_entitlement(request: ValidationRequest, db=Depends(get_db)):
 async def report_usage(request: UsageReport, db=Depends(get_db)):
     """
     Report usage to both local cache and operator
+    CRITICAL FIX: Now requires the actual JWT token in the request
     """
+    # CRITICAL: Verify the token is not empty
+    if not request.token or request.token == "":
+        raise HTTPException(
+            status_code=400,
+            detail="Token is required and cannot be empty for usage reporting"
+        )
+
     async with db.acquire() as conn:
         # Get local entitlement
         entitlement = await conn.fetchrow(
@@ -265,6 +304,13 @@ async def report_usage(request: UsageReport, db=Depends(get_db)):
 
         if not entitlement:
             raise HTTPException(status_code=404, detail="Entitlement not found")
+
+        # CRITICAL: Verify token matches
+        if entitlement['token'] != request.token:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token for this entitlement"
+            )
 
         # Check quota
         if entitlement['remaining_volume'] < request.volume_consumed:
@@ -293,7 +339,7 @@ async def report_usage(request: UsageReport, db=Depends(get_db)):
             new_remaining, new_status, request.entitlement_id
         )
 
-        # Report to operator
+        # Report to operator with the actual token
         operator_request = {
             "entitlement_id": request.entitlement_id,
             "device_id": request.device_id,
