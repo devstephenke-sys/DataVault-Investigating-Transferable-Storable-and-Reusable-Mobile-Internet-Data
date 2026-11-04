@@ -15,6 +15,7 @@ import json
 
 from config import settings
 from security import get_jwt_manager, SubscriberAuth
+from revocation import RevocationManager
 
 # Configuration
 DATABASE_URL = settings.DATABASE_URL
@@ -29,11 +30,15 @@ subscriber_auth = SubscriberAuth(jwt_manager)
 # Database connection pool
 db_pool = None
 
+# Revocation manager
+revocation_manager = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_pool
+    global db_pool, revocation_manager
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
+        revocation_manager = RevocationManager(db_pool)
         print(f"Connected to database: {DATABASE_URL}")
         yield
     finally:
@@ -89,6 +94,10 @@ class UsageReportResult(BaseModel):
     remaining_volume: int
     transaction_id: str
     status: str
+
+class RevocationRequest(BaseModel):
+    reason: str = Field(..., description="Reason for revocation")
+    revoked_by: str = Field(..., description="Who is revoking the entitlement")
 
 # Helper functions
 async def get_db():
@@ -284,6 +293,14 @@ async def validate_entitlement(request: ValidationRequest, db=Depends(get_db)):
                 error="Entitlement not found"
             )
 
+        # Check for revocation
+        if entitlement['status'] == 'REVOKED':
+            return ValidationResult(
+                valid=False,
+                error="Entitlement has been revoked",
+                status="REVOKED"
+            )
+
         # Check status
         if entitlement['status'] not in ['ACTIVE', 'PARTIALLY_CONSUMED']:
             return ValidationResult(
@@ -448,6 +465,51 @@ async def get_entitlement(entitlement_id: str, db=Depends(get_db)):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "simulated-operator-api"}
+
+@app.post("/api/v1/entitlement/{entitlement_id}/revoke")
+async def revoke_entitlement(
+    entitlement_id: str,
+    request: RevocationRequest,
+    db=Depends(get_db)
+):
+    """
+    Revoke an entitlement
+    """
+    success = await revocation_manager.revoke_entitlement(
+        entitlement_id,
+        request.reason,
+        request.revoked_by
+    )
+
+    if not success:
+        raise HTTPException(status_code=404, detail="Entitlement not found or already revoked")
+
+    return {"status": "revoked", "entitlement_id": entitlement_id}
+
+@app.post("/api/v1/device/{device_id}/revoke-entitlements")
+async def revoke_device_entitlements(
+    device_id: str,
+    request: RevocationRequest,
+    db=Depends(get_db)
+):
+    """
+    Revoke all entitlements for a device
+    """
+    count = await revocation_manager.revoke_by_device(
+        device_id,
+        request.reason,
+        request.revoked_by
+    )
+
+    return {"status": "revoked", "count": count, "device_id": device_id}
+
+@app.get("/api/v1/entitlement/{entitlement_id}/revocation-history")
+async def get_revocation_history(entitlement_id: str, db=Depends(get_db)):
+    """
+    Get revocation history for an entitlement
+    """
+    history = await revocation_manager.get_revocation_history(entitlement_id)
+    return {"entitlement_id": entitlement_id, "history": history}
 
 if __name__ == "__main__":
     import uvicorn

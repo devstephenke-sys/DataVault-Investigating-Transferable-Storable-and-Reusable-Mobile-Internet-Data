@@ -115,6 +115,22 @@ CREATE TABLE IF NOT EXISTS subscriber_authorizations (
     CONSTRAINT fk_device FOREIGN KEY (authorized_device_id) REFERENCES device_registrations(device_id) ON DELETE CASCADE
 );
 
+-- Revocation log
+CREATE TABLE IF NOT EXISTS revocation_log (
+    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    entitlement_id UUID,
+    revoked_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    reason TEXT NOT NULL,
+    revoked_by VARCHAR(255) NOT NULL,
+    bulk_device_id VARCHAR(255),
+    bulk_subscriber_id VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_revocation_entitlement ON revocation_log(entitlement_id);
+CREATE INDEX idx_revocation_device ON revocation_log(bulk_device_id);
+CREATE INDEX idx_revocation_subscriber ON revocation_log(bulk_subscriber_id);
+
 -- Insert test data
 INSERT INTO subscribers (subscriber_id, msisdn, imsi, name, status) VALUES
 ('TEST-SUB-001', '254712345678', '639012345678901', 'Test User 1', 'ACTIVE'),
